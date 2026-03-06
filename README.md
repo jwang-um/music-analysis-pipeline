@@ -1,3 +1,4 @@
+This is a WIP. Interactive Score and NMF plots do not work properly.
 # Music Analysis Pipeline
 
 An unsupervised music analysis toolkit that discovers recurring motifs, structural sections, and textural patterns in multi-movement orchestral works. Combines MIDI score analysis with audio feature extraction to produce interactive visualizations and a rendered score with analysis overlays.
