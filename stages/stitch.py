@@ -8,6 +8,29 @@ def _normalize_part_name(raw_name: str, part_name_map: Dict[str, str]) -> str:
     return part_name_map.get(raw_name, raw_name)
 
 
+_COMMON_ABBREVIATIONS: Dict[str, str] = {
+    'violin': 'Vln', 'viola': 'Vla', 'cello': 'Vc', 'violoncello': 'Vc',
+    'contrabass': 'Cb', 'double bass': 'Cb', 'bass': 'B',
+    'flute': 'Fl', 'oboe': 'Ob', 'clarinet': 'Cl', 'bassoon': 'Bsn',
+    'horn': 'Hn', 'trumpet': 'Tpt', 'trombone': 'Tbn', 'tuba': 'Tba',
+    'timpani': 'Timp', 'percussion': 'Perc', 'harp': 'Hp', 'piano': 'Pno',
+    'piccolo': 'Picc', 'english horn': 'E.Hn', 'cor anglais': 'C.A.',
+    'contrabassoon': 'Cbsn', 'celesta': 'Cel', 'xylophone': 'Xyl',
+}
+
+
+def _abbreviate_part_name(name: str) -> str:
+    lower = name.lower().strip()
+    for full, abbr in _COMMON_ABBREVIATIONS.items():
+        if lower.startswith(full):
+            suffix = name[len(full):].strip()
+            return f'{abbr} {suffix}'.strip() if suffix else abbr
+    words = name.split()
+    if len(words) == 1:
+        return name[:4] + '.' if len(name) > 4 else name
+    return ''.join(w[0].upper() for w in words if w)
+
+
 def stitch_movements(midi_paths: List[str],
                      part_name_map: Dict[str, str] = None) -> Dict:
     """
@@ -83,6 +106,7 @@ def stitch_movements(midi_paths: List[str],
                 if name not in part_streams:
                     p = music21.stream.Part()
                     p.partName = name
+                    p.partAbbreviation = _abbreviate_part_name(name)
                     part_streams[name] = p
                 for el in part.flatten().notesAndRests:
                     new_el = el.__deepcopy__({})

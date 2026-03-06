@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QSlider, QComboBox, QCheckBox,
 )
+from PySide6.QtWebEngineCore import QWebEnginePage
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebChannel import QWebChannel
 
@@ -23,7 +24,7 @@ SCORE_HTML = r"""<!DOCTYPE html>
 <style>
 body { margin:0; padding:0; overflow-y:auto; background:#fff;
        font-family:'Segoe UI','Roboto',sans-serif; }
-#score-container { padding:10px 20px; min-height:200px; }
+#score-container { padding:10px 20px; min-height:200px; overflow-x:auto; }
 #loading { text-align:center; padding:60px 20px; color:#5F6368; font-size:14px; }
 #loading .spinner { display:inline-block; width:28px; height:28px;
     border:3px solid #DADCE0; border-top-color:#1A73E8;
@@ -35,11 +36,20 @@ body { margin:0; padding:0; overflow-y:auto; background:#fff;
     0%   { filter: drop-shadow(0 0 6px #FBBC04); }
     100% { filter: none; }
 }
+#tooltip {
+    position: fixed; display: none; z-index: 9999;
+    max-width: 320px; padding: 8px 12px;
+    background: rgba(32, 33, 36, 0.95); color: #fff;
+    font-size: 12px; line-height: 1.4;
+    border-radius: 6px; pointer-events: none;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+}
 </style>
 </head>
 <body>
 <div id="loading"><div class="spinner"></div><br>Loading Verovio engraver&hellip;</div>
 <div id="score-container"></div>
+<div id="tooltip"></div>
 
 <script src="https://www.verovio.org/javascript/latest/verovio-toolkit-wasm.js"></script>
 <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
@@ -51,9 +61,42 @@ var pageCount = 0;
 var musicXmlData = '';
 var bridge = null;
 var scale = 35;
+var overlayData = {motifs:[], crosspart:[], sections:[], nmf:[]};
+
+var tooltipEl = null;
+function initTooltip() {
+    if (!tooltipEl) tooltipEl = document.getElementById('tooltip');
+    return tooltipEl;
+}
+function showTooltip(text, clientX, clientY) {
+    var el = initTooltip();
+    if (!el) return;
+    el.textContent = text;
+    el.style.display = 'block';
+    moveTooltip(clientX, clientY);
+}
+function hideTooltip() {
+    var el = initTooltip();
+    if (el) el.style.display = 'none';
+}
+function moveTooltip(clientX, clientY) {
+    var el = initTooltip();
+    if (!el || el.style.display !== 'block') return;
+    var offset = 14;
+    var x = clientX + offset;
+    var y = clientY + offset;
+    var r = el.getBoundingClientRect();
+    if (x + r.width > window.innerWidth) x = clientX - r.width - offset;
+    if (y + r.height > window.innerHeight) y = clientY - r.height - offset;
+    if (x < 0) x = offset;
+    if (y < 0) y = offset;
+    el.style.left = x + 'px';
+    el.style.top = y + 'px';
+}
 
 new QWebChannel(qt.webChannelTransport, function(channel) {
     bridge = channel.objects.bridge;
+    console.log('[score] QWebChannel bridge established:', !!bridge);
 });
 
 function loadScoreBase64(b64) {
@@ -68,19 +111,28 @@ function renderScore() {
 
     var pw = Math.max(800, container.clientWidth - 40);
     vrvToolkit.setOptions({
-        pageWidth:  Math.round(pw * 100 / scale),
+        pageWidth:  Math.round(pw * 250 / scale),
         pageHeight: 30000,
         scale: scale,
         adjustPageHeight: false,
         breaks: 'auto',
+        condense: 'none',
         spacingStaff: 4,
-        spacingSystem: 4
+        spacingSystem: 4,
+        spacingLinear: 0.15,
+        spacingNonLinear: 0.4
     });
     vrvToolkit.loadData(musicXmlData);
     pageCount = vrvToolkit.getPageCount();
 
-    try { timemap = JSON.parse(vrvToolkit.renderToTimemap()); }
-    catch(e) { timemap = []; }
+    try {
+        var tmResult = vrvToolkit.renderToTimemap();
+        timemap = (typeof tmResult === 'string') ? JSON.parse(tmResult) : tmResult;
+    } catch(e) { console.warn('[score] renderToTimemap failed:', e); timemap = []; }
+
+    console.log('[score] renderScore: pages=' + pageCount +
+                ', timemap entries=' + timemap.length +
+                ', first entry:', timemap.length > 0 ? JSON.stringify(timemap[0]) : 'N/A');
 
     renderPage(1);
     if (bridge) bridge.onScoreLoaded(pageCount, JSON.stringify(timemap));
@@ -91,6 +143,7 @@ function renderPage(n) {
     currentPage = n;
     var svg = vrvToolkit.renderToSVG(n);
     document.getElementById('score-container').innerHTML = svg;
+    applyStoredOverlays();
     if (bridge) bridge.onPageChanged(currentPage, pageCount);
 }
 
@@ -129,28 +182,172 @@ function findNoteIdsInRange(beatStart, beatEnd) {
     return ids;
 }
 
-function highlightNotes(noteIds, color, className) {
+function highlightNotes(noteIds, color, className, label) {
+    var found = 0;
+    var tipText = (label != null && label !== '') ? String(label) : null;
     for (var i = 0; i < noteIds.length; i++) {
         var el = document.getElementById(noteIds[i]);
         if (!el) continue;
+        found++;
         el.classList.add(className);
-        var children = el.querySelectorAll('path, use, ellipse, rect, polygon');
-        for (var j = 0; j < children.length; j++) {
-            children[j].style.fill = color;
-        }
+        try {
+            var bbox = el.getBBox();
+            var rect = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+            rect.setAttribute('x', bbox.x - 2);
+            rect.setAttribute('y', bbox.y - 2);
+            rect.setAttribute('width', bbox.width + 4);
+            rect.setAttribute('height', bbox.height + 4);
+            rect.setAttribute('fill', color);
+            rect.setAttribute('opacity', '0.35');
+            rect.setAttribute('rx', '3');
+            rect.classList.add(className + '-bg');
+            if (tipText) {
+                rect.addEventListener('mouseenter', function(e) {
+                    showTooltip(tipText, e.clientX, e.clientY);
+                });
+                rect.addEventListener('mousemove', function(e) {
+                    moveTooltip(e.clientX, e.clientY);
+                });
+                rect.addEventListener('mouseleave', function() { hideTooltip(); });
+            }
+            el.parentNode.insertBefore(rect, el);
+        } catch(e) {}
     }
+    return found;
 }
 
 function clearHighlights(className) {
     var els = document.querySelectorAll('.' + className);
-    for (var i = 0; i < els.length; i++) {
-        els[i].classList.remove(className);
-        var children = els[i].querySelectorAll('path, use, ellipse, rect, polygon');
-        for (var j = 0; j < children.length; j++) {
-            children[j].style.fill = '';
+    for (var i = 0; i < els.length; i++) els[i].classList.remove(className);
+    var bgs = document.querySelectorAll('.' + className + '-bg');
+    for (var i = bgs.length - 1; i >= 0; i--) bgs[i].remove();
+}
+
+/* ---- Page-aware overlay system ---- */
+
+function setOverlayData(data) {
+    overlayData = data || {motifs:[], crosspart:[], sections:[], nmf:[]};
+    applyStoredOverlays();
+}
+
+function applyStoredOverlays() {
+    clearHighlights('hl-motif');
+    clearHighlights('hl-crosspart');
+    clearHighlights('hl-section');
+    clearHighlights('hl-nmf');
+
+    var noteEls = document.querySelectorAll('.note[id]');
+    var visibleSet = {};
+    for (var i = 0; i < noteEls.length; i++) visibleSet[noteEls[i].id] = true;
+    var visibleCount = Object.keys(visibleSet).length;
+
+    if (visibleCount === 0 || timemap.length === 0) {
+        console.log('[score] applyStoredOverlays: skip (visibleNotes=' +
+                    visibleCount + ', timemap=' + timemap.length + ')');
+        return;
+    }
+
+    var beatEntries = [];
+    for (var i = 0; i < timemap.length; i++) {
+        var entry = timemap[i];
+        if (!entry.on) continue;
+        var vis = [];
+        for (var j = 0; j < entry.on.length; j++) {
+            if (visibleSet[entry.on[j]]) vis.push(entry.on[j]);
+        }
+        if (vis.length > 0) {
+            beatEntries.push({qs: _qs(entry), ids: vis});
         }
     }
+
+    function idsNearBeat(beat, tol) {
+        var result = [];
+        for (var k = 0; k < beatEntries.length; k++) {
+            if (Math.abs(beatEntries[k].qs - beat) <= tol) {
+                result = result.concat(beatEntries[k].ids);
+            }
+        }
+        return result;
+    }
+
+    function idsInRange(bStart, bEnd) {
+        var result = [];
+        for (var k = 0; k < beatEntries.length; k++) {
+            if (beatEntries[k].qs >= bStart && beatEntries[k].qs <= bEnd) {
+                result = result.concat(beatEntries[k].ids);
+            }
+        }
+        return result;
+    }
+
+    var d = overlayData;
+    var totalFound = 0;
+
+    if (d.motifs) {
+        for (var i = 0; i < d.motifs.length; i++) {
+            var m = d.motifs[i];
+            var ab = idsNearBeat(m.b1, 4.0).concat(idsNearBeat(m.b2, 4.0));
+            if (ab.length) totalFound += highlightNotes(ab, m.color, 'hl-motif', m.label || '');
+        }
+    }
+
+    if (d.crosspart) {
+        for (var i = 0; i < d.crosspart.length; i++) {
+            var cp = d.crosspart[i];
+            var a = idsNearBeat(cp.b1, 4.0);
+            var b = idsNearBeat(cp.b2, 4.0);
+            var lbl = cp.label || '';
+            if (a.length) totalFound += highlightNotes(a, '#FF6D00', 'hl-crosspart', lbl);
+            if (b.length) totalFound += highlightNotes(b, '#AA00FF', 'hl-crosspart', lbl);
+        }
+    }
+
+    if (d.sections) {
+        for (var i = 0; i < d.sections.length; i++) {
+            var sec = d.sections[i];
+            var ids = idsInRange(sec.b1, sec.b2);
+            if (ids.length) totalFound += highlightNotes(ids, sec.color, 'hl-section', sec.label || '');
+        }
+    }
+
+    if (d.nmf) {
+        for (var i = 0; i < d.nmf.length; i++) {
+            var nm = d.nmf[i];
+            var ids = idsNearBeat(nm.beat, 2.0);
+            if (ids.length) totalFound += highlightNotes(ids, nm.color, 'hl-nmf', nm.label || '');
+        }
+    }
+
+    console.log('[score] applyStoredOverlays: page=' + currentPage +
+                ', visibleNotes=' + visibleCount +
+                ', beatEntries=' + beatEntries.length +
+                ', totalHighlighted=' + totalFound +
+                ', motifs=' + (d.motifs ? d.motifs.length : 0) +
+                ', crosspart=' + (d.crosspart ? d.crosspart.length : 0) +
+                ', sections=' + (d.sections ? d.sections.length : 0) +
+                ', nmf=' + (d.nmf ? d.nmf.length : 0));
 }
+
+function getTimemapRange() {
+    if (timemap.length === 0)
+        return JSON.stringify({count:0, min:0, max:0, hasQstamp:false, hasOn:false});
+    var min = Infinity, max = -Infinity, onCount = 0;
+    for (var i = 0; i < timemap.length; i++) {
+        var q = _qs(timemap[i]);
+        if (q < min) min = q;
+        if (q > max) max = q;
+        if (timemap[i].on) onCount++;
+    }
+    return JSON.stringify({
+        count: timemap.length, min: min, max: max,
+        onCount: onCount,
+        hasQstamp: timemap[0].qstamp !== undefined,
+        hasTstamp: timemap[0].tstamp !== undefined,
+        sampleKeys: Object.keys(timemap[0]).join(',')
+    });
+}
+
+/* ---- Navigation ---- */
 
 function goToBeat(beat) {
     var ids = findNoteIdsAtBeat(beat, 4.0);
@@ -176,7 +373,7 @@ function findNearestNoteIds(beat) {
     for (var i = 0; i < timemap.length; i++) {
         var entry = timemap[i];
         if (!entry.on) continue;
-        var qs = entry.qstamp !== undefined ? entry.qstamp : 0;
+        var qs = _qs(entry);
         var dist = Math.abs(qs - beat);
         if (dist < bestDist) {
             bestDist = dist;
@@ -199,6 +396,11 @@ verovio.module.onRuntimeInitialized = function() {
 </script>
 </body>
 </html>"""
+
+
+def _fmt_time(seconds: float) -> str:
+    m, s = divmod(int(round(seconds)), 60)
+    return f'{m}:{s:02d}'
 
 
 def _seconds_to_beats(times_sec: List[float],
@@ -229,6 +431,20 @@ def _seconds_to_beats(times_sec: List[float],
         beat = cum_beats[idx] + remaining * bpm / 60.0
         result.append(beat)
     return result
+
+
+class DebugWebPage(QWebEnginePage):
+    """Routes JavaScript console output to Python stdout for diagnostics."""
+
+    _LEVELS = {
+        QWebEnginePage.JavaScriptConsoleMessageLevel.InfoMessageLevel: 'INFO',
+        QWebEnginePage.JavaScriptConsoleMessageLevel.WarningMessageLevel: 'WARN',
+        QWebEnginePage.JavaScriptConsoleMessageLevel.ErrorMessageLevel: 'ERROR',
+    }
+
+    def javaScriptConsoleMessage(self, level, message, line, source_id):
+        tag = self._LEVELS.get(level, 'LOG')
+        print(f'[ScoreJS {tag}] {message}')
 
 
 class ScoreBridge(QObject):
@@ -353,13 +569,15 @@ class ScoreTab(QWidget):
         tb_widget.setObjectName('toolbar')
         layout.addWidget(tb_widget)
 
-        # -- web view --
+        # -- web view with debug page --
+        self._debug_page = DebugWebPage()
         self._web_view = QWebEngineView()
+        self._web_view.setPage(self._debug_page)
 
         self._bridge = ScoreBridge()
         self._channel = QWebChannel()
         self._channel.registerObject('bridge', self._bridge)
-        self._web_view.page().setWebChannel(self._channel)
+        self._debug_page.setWebChannel(self._channel)
 
         self._bridge.verovio_ready.connect(self._on_verovio_ready)
         self._bridge.score_loaded.connect(self._on_score_loaded)
@@ -386,7 +604,7 @@ class ScoreTab(QWidget):
                 self._pending_musicxml = results.musicxml_data
 
     def navigate_to_beat(self, beat: float):
-        self._web_view.page().runJavaScript(f'goToBeat({beat});')
+        self._debug_page.runJavaScript(f'goToBeat({beat});')
 
     def navigate_to_seconds(self, seconds: float):
         if not self._results or not self._results.tempo_marks:
@@ -398,7 +616,7 @@ class ScoreTab(QWidget):
 
     def _load_score(self, musicxml: str):
         encoded = base64.b64encode(musicxml.encode('utf-8')).decode('ascii')
-        self._web_view.page().runJavaScript(
+        self._debug_page.runJavaScript(
             f"loadScoreBase64('{encoded}');")
 
     def _on_verovio_ready(self):
@@ -413,30 +631,45 @@ class ScoreTab(QWidget):
             self._timemap = json.loads(timemap_json)
         except (json.JSONDecodeError, TypeError):
             self._timemap = []
+
+        print(f'[ScoreTab] Score loaded: pages={page_count}, '
+              f'timemap_entries={len(self._timemap)}')
+
+        if self._timemap:
+            sample = self._timemap[0]
+            keys = list(sample.keys())
+            print(f'[ScoreTab] Timemap sample keys: {keys}')
+            qs_vals = [e.get('qstamp', e.get('tstamp', None))
+                       for e in self._timemap[:5]]
+            print(f'[ScoreTab] First 5 qstamp values: {qs_vals}')
+
+        self._debug_page.runJavaScript(
+            'getTimemapRange();',
+            lambda r: print(f'[ScoreTab] JS timemap range: {r}'))
+
         self._page_label.setText(f'Page 1 / {page_count}')
-        self._refresh_overlays()
+        self._send_overlay_data()
 
     def _on_page_changed(self, current: int, total: int):
         self._current_page = current
         self._page_count = total
         self._page_label.setText(f'Page {current} / {total}')
-        self._apply_current_overlays()
 
     # ------------------------------------------------------------- navigation
 
     def _prev_page(self):
         if self._current_page > 1:
-            self._web_view.page().runJavaScript(
+            self._debug_page.runJavaScript(
                 f'goToPage({self._current_page - 1});')
 
     def _next_page(self):
         if self._current_page < self._page_count:
-            self._web_view.page().runJavaScript(
+            self._debug_page.runJavaScript(
                 f'goToPage({self._current_page + 1});')
 
     def _on_zoom(self, value: int):
         self._zoom_val.setText(f'{value}%')
-        self._web_view.page().runJavaScript(f'setScale({value});')
+        self._debug_page.runJavaScript(f'setScale({value});')
 
     def _on_movement_jump(self, index: int):
         if index <= 0 or not self._results:
@@ -449,128 +682,110 @@ class ScoreTab(QWidget):
     # -------------------------------------------------------------- overlays
 
     def _refresh_overlays(self):
-        self._apply_current_overlays()
+        self._send_overlay_data()
 
-    def _apply_current_overlays(self):
+    def _send_overlay_data(self):
+        """Build all overlay data as JSON and send to JS in one call."""
         if not self._results or not self._timemap:
+            print(f'[ScoreTab] _send_overlay_data: skipped '
+                  f'(results={self._results is not None}, '
+                  f'timemap={len(self._timemap)})')
             return
 
-        for cls in ('hl-motif', 'hl-crosspart', 'hl-section', 'hl-nmf'):
-            self._web_view.page().runJavaScript(
-                f"clearHighlights('{cls}');")
-
-        if self._chk_motifs.isChecked():
-            self._apply_motif_highlights()
-        if self._chk_crosspart.isChecked():
-            self._apply_crosspart_highlights()
-        if self._chk_sections.isChecked():
-            self._apply_section_highlights()
-        if self._chk_nmf.isChecked():
-            self._apply_nmf_highlights()
-
-    def _apply_motif_highlights(self):
+        data = {'motifs': [], 'crosspart': [], 'sections': [], 'nmf': []}
         r = self._results
-        if not r or not r.motif_pairs or not r.cluster_labels:
-            return
 
-        all_secs = []
-        for t1, t2 in r.motif_pairs:
-            all_secs.extend([t1, t2])
-        beats = _seconds_to_beats(all_secs, r.tempo_marks)
+        if self._chk_motifs.isChecked() and r.motif_pairs and r.cluster_labels:
+            all_secs = []
+            for t1, t2 in r.motif_pairs:
+                all_secs.extend([t1, t2])
+            beats = _seconds_to_beats(all_secs, r.tempo_marks)
+            frags = getattr(r, 'motif_fragments', []) or []
+            for i, label in enumerate(r.cluster_labels):
+                if i >= len(r.motif_pairs):
+                    break
+                t1, t2 = r.motif_pairs[i]
+                frag_str = ' '.join(str(x) for x in frags[i]) if i < len(frags) else '—'
+                data['motifs'].append({
+                    'b1': beats[i * 2], 'b2': beats[i * 2 + 1],
+                    'color': TAB10_HEX[label % 10],
+                    'label': f'Motif Family {label} | {_fmt_time(t1)} → {_fmt_time(t2)} | Pattern: {frag_str}'
+                })
+            if data['motifs']:
+                sample_beats = [data['motifs'][0]['b1'],
+                                data['motifs'][0]['b2']]
+                print(f'[ScoreTab] Motif overlay: {len(data["motifs"])} pairs, '
+                      f'sample beats: {sample_beats}')
 
-        cmds = []
-        for i, ((t1, t2), label) in enumerate(
-                zip(r.motif_pairs, r.cluster_labels)):
-            b1 = beats[i * 2]
-            b2 = beats[i * 2 + 1]
-            color = TAB10_HEX[label % 10]
-            cmds.append(
-                f"(function(){{"
-                f"var a=findNoteIdsAtBeat({b1},4.0);"
-                f"var b=findNoteIdsAtBeat({b2},4.0);"
-                f"highlightNotes(a.concat(b),'{color}','hl-motif');"
-                f"}})()")
-        if cmds:
-            self._web_view.page().runJavaScript('\n'.join(cmds))
-
-    def _apply_crosspart_highlights(self):
-        r = self._results
-        if not r or not r.cross_part_pairs:
-            return
-
-        all_secs = []
-        for t1, t2 in r.cross_part_pairs:
-            all_secs.extend([t1, t2])
-        beats = _seconds_to_beats(all_secs, r.tempo_marks)
-
-        cmds = []
-        for i in range(len(r.cross_part_pairs)):
-            b1 = beats[i * 2]
-            b2 = beats[i * 2 + 1]
-            cmds.append(
-                f"(function(){{"
-                f"var a=findNoteIdsAtBeat({b1},4.0);"
-                f"var b=findNoteIdsAtBeat({b2},4.0);"
-                f"highlightNotes(a,'#FF6D00','hl-crosspart');"
-                f"highlightNotes(b,'#AA00FF','hl-crosspart');"
-                f"}})()")
-        if cmds:
-            self._web_view.page().runJavaScript('\n'.join(cmds))
-
-    def _apply_section_highlights(self):
-        r = self._results
-        if not r or not r.sections:
-            return
+        if self._chk_crosspart.isChecked() and r.cross_part_pairs:
+            all_secs = []
+            for t1, t2 in r.cross_part_pairs:
+                all_secs.extend([t1, t2])
+            beats = _seconds_to_beats(all_secs, r.tempo_marks)
+            details = getattr(r, 'cross_part_details', []) or []
+            for i in range(len(r.cross_part_pairs)):
+                d = details[i] if i < len(details) else {}
+                part_a = d.get('part_a', 'A')
+                part_b = d.get('part_b', 'B')
+                dist = d.get('distance', 0)
+                win = d.get('window', 0)
+                data['crosspart'].append({
+                    'b1': beats[i * 2], 'b2': beats[i * 2 + 1],
+                    'label': f'{part_a} → {part_b} | Distance: {dist:.2f} | Window: {win}'
+                })
 
         section_colors = [
             '#1A73E8', '#34A853', '#FBBC04', '#EA4335', '#9467bd',
             '#8c564b', '#e377c2', '#17becf', '#bcbd22', '#ff7f0e',
         ]
+        if self._chk_sections.isChecked() and r.sections:
+            all_secs = []
+            for s in r.sections:
+                all_secs.extend([s.get('start_sec', 0), s.get('end_sec', 0)])
+            beats = _seconds_to_beats(all_secs, r.tempo_marks)
+            for i, s in enumerate(r.sections):
+                letter = s.get('letter', 'A')
+                start_sec = s.get('start_sec', 0)
+                end_sec = s.get('end_sec', 0)
+                label_idx = ord(letter[0]) - ord('A')
+                data['sections'].append({
+                    'b1': beats[i * 2], 'b2': beats[i * 2 + 1],
+                    'color': section_colors[label_idx % len(section_colors)],
+                    'label': f'Section {letter} | {_fmt_time(start_sec)} – {_fmt_time(end_sec)}'
+                })
+            if data['sections']:
+                print(f'[ScoreTab] Section overlay: {len(data["sections"])} '
+                      f'sections, first range: '
+                      f'{data["sections"][0]["b1"]:.1f}-'
+                      f'{data["sections"][0]["b2"]:.1f}')
 
-        all_secs = []
-        for s in r.sections:
-            all_secs.extend([s.get('start_sec', 0), s.get('end_sec', 0)])
-        beats = _seconds_to_beats(all_secs, r.tempo_marks)
+        if self._chk_nmf.isChecked() and r.nmf_profiles:
+            all_peak_secs = []
+            peak_comp_indices = []
+            peak_profiles = []
+            for profile in r.nmf_profiles:
+                for t in profile.get('top_peaks_sec', [])[:5]:
+                    all_peak_secs.append(t)
+                    peak_comp_indices.append(profile['index'])
+                    peak_profiles.append(profile)
+            if all_peak_secs:
+                beats = _seconds_to_beats(all_peak_secs, r.tempo_marks)
+                comp_labels = getattr(r, 'comp_labels', None) or {}
+                for beat, comp_idx, profile, t_sec in zip(beats, peak_comp_indices, peak_profiles, all_peak_secs):
+                    comp_label = comp_labels.get(comp_idx) or profile.get('label') or profile.get('band') or f'C{comp_idx}'
+                    data['nmf'].append({
+                        'beat': beat,
+                        'color': TAB10_HEX[comp_idx % 10],
+                        'label': f'NMF Component {comp_idx} ({comp_label}) | Peak at {_fmt_time(t_sec)}'
+                    })
 
-        cmds = []
-        for i, s in enumerate(r.sections):
-            b_start = beats[i * 2]
-            b_end = beats[i * 2 + 1]
-            letter = s.get('letter', 'A')
-            label_idx = ord(letter[0]) - ord('A')
-            color = section_colors[label_idx % len(section_colors)]
-            cmds.append(
-                f"(function(){{"
-                f"var ids=findNoteIdsInRange({b_start},{b_end});"
-                f"highlightNotes(ids,'{color}','hl-section');"
-                f"}})()")
-        if cmds:
-            self._web_view.page().runJavaScript('\n'.join(cmds))
+        total = (len(data['motifs']) + len(data['crosspart'])
+                 + len(data['sections']) + len(data['nmf']))
+        print(f'[ScoreTab] Sending overlay data: '
+              f'motifs={len(data["motifs"])}, '
+              f'crosspart={len(data["crosspart"])}, '
+              f'sections={len(data["sections"])}, '
+              f'nmf={len(data["nmf"])}, total_items={total}')
 
-    def _apply_nmf_highlights(self):
-        r = self._results
-        if not r or not r.nmf_profiles:
-            return
-
-        all_peak_secs = []
-        peak_comp_indices = []
-        for profile in r.nmf_profiles:
-            for t in profile.get('top_peaks_sec', [])[:5]:
-                all_peak_secs.append(t)
-                peak_comp_indices.append(profile['index'])
-
-        if not all_peak_secs:
-            return
-
-        beats = _seconds_to_beats(all_peak_secs, r.tempo_marks)
-
-        cmds = []
-        for beat, comp_idx in zip(beats, peak_comp_indices):
-            color = TAB10_HEX[comp_idx % 10]
-            cmds.append(
-                f"(function(){{"
-                f"var ids=findNoteIdsAtBeat({beat},2.0);"
-                f"highlightNotes(ids,'{color}','hl-nmf');"
-                f"}})()")
-        if cmds:
-            self._web_view.page().runJavaScript('\n'.join(cmds))
+        json_str = json.dumps(data)
+        self._debug_page.runJavaScript(f'setOverlayData({json_str});')

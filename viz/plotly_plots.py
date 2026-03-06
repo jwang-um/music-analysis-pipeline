@@ -246,6 +246,14 @@ def nmf_plot_interactive(
     times = np.arange(n_frames) * hop_length / sr
     H_display = np.log1p(H)
 
+    MAX_COLS = 2000
+    if n_frames > MAX_COLS:
+        bin_size = n_frames // MAX_COLS
+        n_trim = bin_size * MAX_COLS
+        H_display = H_display[:, :n_trim].reshape(n_comp, MAX_COLS, bin_size).mean(axis=2)
+        times = times[:n_trim].reshape(MAX_COLS, bin_size).mean(axis=1)
+        n_frames = MAX_COLS
+
     y_labels = [component_labels.get(i, f'Comp {i}') if component_labels
                 else f'Comp {i}' for i in range(n_comp)]
 
