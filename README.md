@@ -71,14 +71,14 @@ music_analysis/
 Requires Python 3.10+.
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/music-analysis-pipeline.git
+git clone https://github.com/jwang-um/music-analysis-pipeline.git
 cd music-analysis-pipeline
 pip install -r requirements.txt
 ```
 
 ### Pre-built executables
 
-Download the latest release from the [Releases](https://github.com/YOUR_USERNAME/music-analysis-pipeline/releases) page. Extract the zip and run `MusicAnalysis.exe` (Windows) or `MusicAnalysis.app` (macOS). No Python installation required.
+Download the latest release from the [Releases](https://github.com/jwang-um/music-analysis-pipeline/releases) page. Extract the zip and run `MusicAnalysis.exe` (Windows) or `MusicAnalysis.app` (macOS). No Python installation required.
 
 ## Usage
 
@@ -102,16 +102,58 @@ python main.py
 
 Produces text reports (`output_*_report.txt`) and figures (`output_*.png`) in the working directory.
 
-## Input data
+## Preparing input data
 
-The pipeline requires **paired MIDI and audio files** for each movement:
+The pipeline analyzes a piece by combining information from two sources — a MIDI score and an audio recording — for each movement. You need to supply both.
 
-| File | Purpose |
-|------|---------|
-| `mov1.mid`, `mov2.mid`, ... | Score data for motif extraction, part identification, and score rendering |
-| `mov1.wav`, `mov2.wav`, ... | Audio for CQT, chroma features, beat tracking, and textural analysis |
+Audio and MIDI files are **not included in this repository** (they are gitignored due to size). You must provide your own.
 
-Place these in a `data/` directory (or configure paths in your config file). MIDI files should contain individual instrument parts — not a single merged track.
+### What you need
+
+For each movement of the piece you want to analyze, prepare:
+
+1. **A MIDI file** (`.mid`) containing the full orchestral score with separate tracks per instrument. These are used for motif extraction, part identification, interval sequence computation, and interactive score rendering.
+
+2. **An audio file** (`.wav`) of a performance of the same movement. These are used for CQT spectrogram computation, chroma features, beat tracking, self-similarity matrix construction, and NMF textural analysis.
+
+The MIDI and audio files must correspond to the same movements and be listed in the same order.
+
+### Where to get them
+
+| Source | MIDI | Audio |
+|--------|------|-------|
+| [IMSLP](https://imslp.org/) | Many public-domain scores available as MIDI exports | Some public-domain recordings |
+| [MuseScore](https://musescore.com/) | Community-uploaded scores (export as MIDI) | — |
+| Notation software (Sibelius, Finale, MuseScore) | Export your own scores to MIDI | — |
+| CD / streaming rips | — | Record or rip your own WAV files |
+
+### MIDI requirements
+
+- **Multi-track**: Each instrument should be on its own MIDI track (not a single merged piano-roll). The pipeline parses individual parts for motif discovery.
+- **One file per movement**: If your MIDI has all movements in one file, split it into separate files per movement.
+- **Standard MIDI format**: Type 0 or Type 1 `.mid` files. music21 handles the parsing.
+
+### File layout
+
+Create a `data/` directory and place your files there:
+
+```
+data/
+├── mov1.mid    # Movement I  — MIDI score
+├── mov1.wav    # Movement I  — audio recording
+├── mov2.mid    # Movement II
+├── mov2.wav
+├── mov3.mid    # Movement III
+├── mov3.wav
+├── mov4.mid    # Movement IV
+└── mov4.wav
+```
+
+Then either edit `config.py` to point to these paths, or create your own config file (see [`config_shostakovich.py`](config_shostakovich.py) for a complete example). In the GUI, you can load a config file from the Setup tab or add files manually.
+
+### Part name normalization
+
+Different movements may use different names for the same instrument (e.g. "Violins" vs "Violin" vs "Violins 1", or "Grand Piano" vs "Piano"). The `PART_NAME_MAP` config option lets you map variant names to a single canonical name so the pipeline can track parts across movements. If your MIDI files already use consistent names, set this to `{}`.
 
 ## Configuration
 

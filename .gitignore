@@ -14,10 +14,16 @@ __pycache__/
 output_*.txt
 output_*.png
 output_checks/
+
+# Audio and MIDI files (too large for git)
 *.wav
 *.mp3
+*.flac
+*.ogg
+*.mid
+*.midi
 
-# User data (MIDI and audio inputs — too large for git)
+# User data directory
 data/
 
 # IDE / editor
