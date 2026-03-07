@@ -5,7 +5,7 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTableWidget,
     QTableWidgetItem, QHeaderView, QSplitter, QFrame, QSizePolicy,
-    QTabWidget, QPushButton,
+    QTabWidget, QPushButton, QScrollArea, QGridLayout,
 )
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from ui.theme import PRIMARY, PRIMARY_LIGHT, TEXT_SECONDARY, TAB10_HEX, SURFACE, BORDER
@@ -26,9 +26,16 @@ def _mov_at(t: float, mov_times, mov_names):
     return mov_names[idx] if idx < len(mov_names) else f'Mov {idx+1}'
 
 
+def _context_line(label: str, value: str) -> QLabel:
+    lbl = QLabel(f'{label}: {value}')
+    lbl.setStyleSheet('font-size: 11px; padding: 1px 0;')
+    lbl.setWordWrap(True)
+    return lbl
+
+
 class ArcTab(QWidget):
 
-    show_in_score = Signal(float)  # time in seconds
+    show_in_score = Signal(float, int)  # (time in seconds, recurrence index)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -102,6 +109,30 @@ class ArcTab(QWidget):
         self._migration_layout.addStretch()
         self._side_tabs.addTab(self._migration_panel, 'Cross-Part')
 
+        # Context comparison panel (section, texture, parts for selected recurrence)
+        self._context_panel = QFrame()
+        self._context_panel.setObjectName('card')
+        self._context_layout = QVBoxLayout(self._context_panel)
+        self._context_layout.setContentsMargins(12, 12, 12, 12)
+        ctx_title = QLabel('Recurrence Context')
+        ctx_title.setStyleSheet('font-size: 12px; font-weight: 600;')
+        self._context_layout.addWidget(ctx_title)
+        self._context_placeholder = QLabel('Select a row to compare context at t1 vs t2.')
+        self._context_placeholder.setStyleSheet(f'font-size: 11px; color: {TEXT_SECONDARY};')
+        self._context_placeholder.setWordWrap(True)
+        self._context_layout.addWidget(self._context_placeholder)
+        self._context_scroll = QScrollArea()
+        self._context_scroll.setWidgetResizable(True)
+        self._context_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._context_inner = QWidget()
+        self._context_inner_layout = QVBoxLayout(self._context_inner)
+        self._context_inner_layout.setContentsMargins(0, 0, 0, 0)
+        self._context_scroll.setWidget(self._context_inner)
+        self._context_layout.addWidget(self._context_scroll)
+        self._side_tabs.addTab(self._context_panel, 'Context')
+
+        self._table.itemSelectionChanged.connect(self._on_selection_changed)
+
         bottom_layout.addWidget(self._side_tabs, stretch=0)
 
         self._splitter.addWidget(bottom)
@@ -131,6 +162,7 @@ class ArcTab(QWidget):
             for col, text in enumerate(items):
                 item = QTableWidgetItem(text)
                 item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                item.setData(Qt.ItemDataRole.UserRole + 1, row)  # store original recurrence index
                 if col == 4:
                     color = TAB10_HEX[label % 10]
                     item.setForeground(QColor(color))
@@ -145,7 +177,7 @@ class ArcTab(QWidget):
             btn.setToolTip('Show in Score')
             btn.setFixedSize(28, 24)
             btn.setStyleSheet('font-size: 13px; border: none; background: transparent;')
-            btn.clicked.connect(lambda checked, s=t1: self.show_in_score.emit(s))
+            btn.clicked.connect(lambda checked, s=t1, r=row: self.show_in_score.emit(s, r))
             self._table.setCellWidget(row, 7, btn)
 
         self._table.setSortingEnabled(True)
@@ -196,7 +228,53 @@ class ArcTab(QWidget):
         row = index.row()
         if self._results and row < len(self._results.motif_pairs):
             t1, _ = self._results.motif_pairs[row]
-            self.show_in_score.emit(t1)
+            self.show_in_score.emit(t1, row)
+
+    def _on_selection_changed(self):
+        rows = self._table.selectionModel().selectedRows()
+        if not rows or not self._results:
+            self._context_placeholder.setVisible(True)
+            self._clear_context_inner()
+            return
+        visual_row = rows[0].row()
+        item = self._table.item(visual_row, 0)
+        row = item.data(Qt.ItemDataRole.UserRole + 1) if item else visual_row
+        if row is None:
+            row = visual_row
+        if row >= len(getattr(self._results, 'motif_contexts', [])):
+            self._context_placeholder.setVisible(True)
+            self._clear_context_inner()
+            return
+        ctx = self._results.motif_contexts[row]
+        self._context_placeholder.setVisible(False)
+        self._clear_context_inner()
+        # Side A
+        la = QLabel('Side A (' + _fmt(ctx['t1']) + ')')
+        la.setStyleSheet('font-size: 11px; font-weight: 600; margin-top: 4px;')
+        self._context_inner_layout.addWidget(la)
+        self._context_inner_layout.addWidget(
+            _context_line('Section', ctx.get('section_a', '—')))
+        self._context_inner_layout.addWidget(
+            _context_line('Texture', ', '.join(ctx.get('texture_a', [])) or '—'))
+        self._context_inner_layout.addWidget(
+            _context_line('Parts', ctx.get('summary_a', '') + ': ' + ', '.join(ctx.get('parts_a', [])) if ctx.get('parts_a') else '—'))
+        # Side B
+        lb = QLabel('Side B (' + _fmt(ctx['t2']) + ')')
+        lb.setStyleSheet('font-size: 11px; font-weight: 600; margin-top: 8px;')
+        self._context_inner_layout.addWidget(lb)
+        self._context_inner_layout.addWidget(
+            _context_line('Section', ctx.get('section_b', '—')))
+        self._context_inner_layout.addWidget(
+            _context_line('Texture', ', '.join(ctx.get('texture_b', [])) or '—'))
+        self._context_inner_layout.addWidget(
+            _context_line('Parts', ctx.get('summary_b', '') + ': ' + ', '.join(ctx.get('parts_b', [])) if ctx.get('parts_b') else '—'))
+        self._context_inner_layout.addStretch()
+
+    def _clear_context_inner(self):
+        while self._context_inner_layout.count():
+            item = self._context_inner_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
 
     @staticmethod
     def _clear_layout(layout, keep=1):

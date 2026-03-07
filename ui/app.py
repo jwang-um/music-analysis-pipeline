@@ -56,8 +56,10 @@ class MainWindow(QMainWindow):
         self._tabs.addTab(self._nmf_tab, 'NMF')
         self._tabs.addTab(self._val_tab, 'Validation')
 
-        self._arc_tab.show_in_score.connect(self._show_in_score)
-        self._nmf_tab.show_in_score.connect(self._show_in_score)
+        self._arc_tab.show_in_score.connect(
+            lambda sec, idx: self._show_in_score(sec, idx))
+        self._nmf_tab.show_in_score.connect(
+            lambda sec: self._show_in_score(sec, None))
 
         root.addWidget(self._tabs, stretch=1)
 
@@ -91,9 +93,11 @@ class MainWindow(QMainWindow):
         self._val_tab.update_results(results)
         self._tabs.setCurrentIndex(1)  # jump to Overview
 
-    def _show_in_score(self, seconds: float):
+    def _show_in_score(self, seconds: float, recurrence_index=None):
         self._tabs.setCurrentWidget(self._score_tab)
         self._score_tab.navigate_to_seconds(seconds)
+        if recurrence_index is not None:
+            self._score_tab.set_selected_recurrence(recurrence_index)
 
     def _on_error(self, msg: str):
         self._toolbar.on_error(msg)

@@ -7,7 +7,7 @@ from typing import List, Optional
 from PySide6.QtCore import Qt, Signal, Slot, QObject, QUrl
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QSlider, QComboBox, QCheckBox,
+    QSlider, QComboBox, QCheckBox, QFrame, QScrollArea,
 )
 from PySide6.QtWebEngineCore import QWebEnginePage
 from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -44,12 +44,30 @@ body { margin:0; padding:0; overflow-y:auto; background:#fff;
     border-radius: 6px; pointer-events: none;
     box-shadow: 0 2px 8px rgba(0,0,0,0.3);
 }
+#click-overlay {
+    position: fixed; display: none; z-index: 9998;
+    bottom: 16px; left: 50%; transform: translateX(-50%);
+    max-width: 400px; padding: 10px 14px;
+    background: rgba(32, 33, 36, 0.95); color: #fff;
+    font-size: 12px; line-height: 1.4;
+    border-radius: 6px; pointer-events: none;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+}
+.hl-motif-bg { stroke-width: 1.2; }
+.hl-motif-bg.hl-emphasized, .hl-crosspart-bg.hl-emphasized,
+.hl-section-bg.hl-emphasized, .hl-nmf-bg.hl-emphasized {
+    opacity: 0.7;
+}
+.hl-crosspart-bg { stroke-dasharray: 5 3; }
+.hl-section-bg { stroke-dasharray: 10 5; }
+.hl-nmf-bg { stroke-dasharray: 2 2; }
 </style>
 </head>
 <body>
 <div id="loading"><div class="spinner"></div><br>Loading Verovio engraver&hellip;</div>
 <div id="score-container"></div>
 <div id="tooltip"></div>
+<div id="click-overlay"></div>
 
 <script src="https://www.verovio.org/javascript/latest/verovio-toolkit-wasm.js"></script>
 <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
@@ -92,6 +110,45 @@ function moveTooltip(clientX, clientY) {
     if (y < 0) y = offset;
     el.style.left = x + 'px';
     el.style.top = y + 'px';
+}
+
+var clickOverlayEl = null;
+function initClickOverlay() {
+    if (!clickOverlayEl) clickOverlayEl = document.getElementById('click-overlay');
+    return clickOverlayEl;
+}
+function showClickOverlay(text) {
+    var el = initClickOverlay();
+    if (!el) return;
+    el.textContent = text || '';
+    el.style.display = 'block';
+}
+function hideClickOverlay() {
+    var el = initClickOverlay();
+    if (el) el.style.display = 'none';
+}
+
+var overlayDataKey = { motif: 'motifs', crosspart: 'crosspart', section: 'sections', nmf: 'nmf' };
+function onOverlayRectClick(ev) {
+    ev.preventDefault();
+    ev.stopPropagation();
+    var rect = ev.currentTarget;
+    var type = rect.getAttribute('data-overlay-type');
+    var index = rect.getAttribute('data-overlay-index');
+    if (type == null || index == null) return;
+    var idx = parseInt(index, 10);
+    if (isNaN(idx)) return;
+    var allBg = document.querySelectorAll('.hl-motif-bg, .hl-crosspart-bg, .hl-section-bg, .hl-nmf-bg');
+    for (var i = 0; i < allBg.length; i++) allBg[i].classList.remove('hl-emphasized');
+    var same = document.querySelectorAll('[data-overlay-type="' + type + '"][data-overlay-index="' + index + '"]');
+    for (var j = 0; j < same.length; j++) same[j].classList.add('hl-emphasized');
+    var label = '';
+    var dataKey = overlayDataKey[type] || type;
+    var arr = overlayData[dataKey];
+    if (arr && arr[idx] && arr[idx].label != null)
+        label = arr[idx].label;
+    showClickOverlay(label);
+    if (type === 'motif' && bridge) bridge.onMotifOverlayClicked(idx);
 }
 
 new QWebChannel(qt.webChannelTransport, function(channel) {
@@ -182,9 +239,16 @@ function findNoteIdsInRange(beatStart, beatEnd) {
     return ids;
 }
 
-function highlightNotes(noteIds, color, className, label) {
+function highlightNotes(noteIds, color, className, label, motifIndex, overlayType, overlayIndex) {
     var found = 0;
     var tipText = (label != null && label !== '') ? String(label) : null;
+    var oType = overlayType;
+    var oIndex = overlayIndex;
+    if (motifIndex !== undefined && motifIndex !== null && motifIndex >= 0) {
+        oType = 'motif';
+        oIndex = motifIndex;
+    }
+    var hasOverlayId = (oType != null && oType !== '' && oIndex !== undefined && oIndex !== null);
     for (var i = 0; i < noteIds.length; i++) {
         var el = document.getElementById(noteIds[i]);
         if (!el) continue;
@@ -198,9 +262,18 @@ function highlightNotes(noteIds, color, className, label) {
             rect.setAttribute('width', bbox.width + 4);
             rect.setAttribute('height', bbox.height + 4);
             rect.setAttribute('fill', color);
+            rect.setAttribute('stroke', color);
+            rect.setAttribute('stroke-width', '1.2');
             rect.setAttribute('opacity', '0.35');
             rect.setAttribute('rx', '3');
             rect.classList.add(className + '-bg');
+            if (oType === 'motif') rect.setAttribute('data-motif-index', oIndex);
+            if (hasOverlayId) {
+                rect.setAttribute('data-overlay-type', oType);
+                rect.setAttribute('data-overlay-index', String(oIndex));
+                rect.style.cursor = 'pointer';
+                rect.addEventListener('click', onOverlayRectClick);
+            }
             if (tipText) {
                 rect.addEventListener('mouseenter', function(e) {
                     showTooltip(tipText, e.clientX, e.clientY);
@@ -287,7 +360,7 @@ function applyStoredOverlays() {
         for (var i = 0; i < d.motifs.length; i++) {
             var m = d.motifs[i];
             var ab = idsNearBeat(m.b1, 4.0).concat(idsNearBeat(m.b2, 4.0));
-            if (ab.length) totalFound += highlightNotes(ab, m.color, 'hl-motif', m.label || '');
+            if (ab.length) totalFound += highlightNotes(ab, m.color, 'hl-motif', m.label || '', i);
         }
     }
 
@@ -297,8 +370,8 @@ function applyStoredOverlays() {
             var a = idsNearBeat(cp.b1, 4.0);
             var b = idsNearBeat(cp.b2, 4.0);
             var lbl = cp.label || '';
-            if (a.length) totalFound += highlightNotes(a, '#FF6D00', 'hl-crosspart', lbl);
-            if (b.length) totalFound += highlightNotes(b, '#AA00FF', 'hl-crosspart', lbl);
+            if (a.length) totalFound += highlightNotes(a, '#FF6D00', 'hl-crosspart', lbl, -1, 'crosspart', i);
+            if (b.length) totalFound += highlightNotes(b, '#AA00FF', 'hl-crosspart', lbl, -1, 'crosspart', i);
         }
     }
 
@@ -306,7 +379,7 @@ function applyStoredOverlays() {
         for (var i = 0; i < d.sections.length; i++) {
             var sec = d.sections[i];
             var ids = idsInRange(sec.b1, sec.b2);
-            if (ids.length) totalFound += highlightNotes(ids, sec.color, 'hl-section', sec.label || '');
+            if (ids.length) totalFound += highlightNotes(ids, sec.color, 'hl-section', sec.label || '', -1, 'section', i);
         }
     }
 
@@ -314,7 +387,7 @@ function applyStoredOverlays() {
         for (var i = 0; i < d.nmf.length; i++) {
             var nm = d.nmf[i];
             var ids = idsNearBeat(nm.beat, 2.0);
-            if (ids.length) totalFound += highlightNotes(ids, nm.color, 'hl-nmf', nm.label || '');
+            if (ids.length) totalFound += highlightNotes(ids, nm.color, 'hl-nmf', nm.label || '', -1, 'nmf', i);
         }
     }
 
@@ -453,6 +526,7 @@ class ScoreBridge(QObject):
     verovio_ready = Signal()
     score_loaded = Signal(int, str)
     page_changed = Signal(int, int)
+    motif_overlay_clicked = Signal(int)
 
     @Slot()
     def onVerovioReady(self):
@@ -465,6 +539,10 @@ class ScoreBridge(QObject):
     @Slot(int, int)
     def onPageChanged(self, current: int, total: int):
         self.page_changed.emit(current, total)
+
+    @Slot(int)
+    def onMotifOverlayClicked(self, motif_index: int):
+        self.motif_overlay_clicked.emit(motif_index)
 
 
 class ScoreTab(QWidget):
@@ -481,6 +559,7 @@ class ScoreTab(QWidget):
         self._current_page = 1
         self._verovio_ready = False
         self._pending_musicxml: Optional[str] = None
+        self._selected_recurrence_index: Optional[int] = None
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -562,12 +641,38 @@ class ScoreTab(QWidget):
         self._chk_nmf.toggled.connect(self._refresh_overlays)
         tb.addWidget(self._chk_nmf)
 
+        tb.addSpacing(12)
+        legend_lbl = QLabel('Border: solid=Motifs  — — =Sections  - - =Cross-part  ···=NMF')
+        legend_lbl.setStyleSheet('font-size: 10px; color: #5F6368;')
+        legend_lbl.setToolTip('Highlight border style identifies overlay type at a glance.')
+        tb.addWidget(legend_lbl)
+
         tb.addStretch()
 
         tb_widget = QWidget()
         tb_widget.setLayout(tb)
         tb_widget.setObjectName('toolbar')
         layout.addWidget(tb_widget)
+
+        # -- recurrence context card (shown when a motif recurrence is selected) --
+        self._context_card = QFrame()
+        self._context_card.setObjectName('card')
+        self._context_card.setVisible(False)
+        card_layout = QVBoxLayout(self._context_card)
+        card_layout.setContentsMargins(10, 8, 10, 8)
+        self._context_card_title = QLabel('Recurrence context')
+        self._context_card_title.setStyleSheet('font-size: 12px; font-weight: 600;')
+        card_layout.addWidget(self._context_card_title)
+        self._context_card_scroll = QScrollArea()
+        self._context_card_scroll.setWidgetResizable(True)
+        self._context_card_scroll.setMaximumHeight(120)
+        self._context_card_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._context_card_inner = QWidget()
+        self._context_card_inner_layout = QVBoxLayout(self._context_card_inner)
+        self._context_card_inner_layout.setContentsMargins(0, 0, 0, 0)
+        self._context_card_scroll.setWidget(self._context_card_inner)
+        card_layout.addWidget(self._context_card_scroll)
+        layout.addWidget(self._context_card)
 
         # -- web view with debug page --
         self._debug_page = DebugWebPage()
@@ -582,6 +687,7 @@ class ScoreTab(QWidget):
         self._bridge.verovio_ready.connect(self._on_verovio_ready)
         self._bridge.score_loaded.connect(self._on_score_loaded)
         self._bridge.page_changed.connect(self._on_page_changed)
+        self._bridge.motif_overlay_clicked.connect(self._on_motif_overlay_clicked)
 
         layout.addWidget(self._web_view, stretch=1)
 
@@ -611,6 +717,19 @@ class ScoreTab(QWidget):
             return
         beats = _seconds_to_beats([seconds], self._results.tempo_marks)
         self.navigate_to_beat(beats[0])
+
+    def set_selected_recurrence(self, index: Optional[int]):
+        """Show the recurrence context card for the given motif index, or hide if None."""
+        self._selected_recurrence_index = index
+        if index is None or not self._results:
+            self._context_card.setVisible(False)
+            return
+        contexts = getattr(self._results, 'motif_contexts', []) or []
+        if index >= len(contexts):
+            self._context_card.setVisible(False)
+            return
+        self._populate_context_card(contexts[index])
+        self._context_card.setVisible(True)
 
     # --------------------------------------------------------------- internal
 
@@ -678,6 +797,44 @@ class ScoreTab(QWidget):
         offsets = self._results.movement_offsets_beats
         if mov_idx < len(offsets):
             self.navigate_to_beat(offsets[mov_idx])
+
+    def _on_motif_overlay_clicked(self, motif_index: int):
+        self.set_selected_recurrence(motif_index)
+        if self._results and motif_index < len(getattr(self._results, 'motif_contexts', [])):
+            ctx = self._results.motif_contexts[motif_index]
+            self.navigate_to_seconds(ctx['t1'])
+
+    def _clear_context_card_inner(self):
+        while self._context_card_inner_layout.count():
+            item = self._context_card_inner_layout.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+
+    def _populate_context_card(self, ctx: dict):
+        self._clear_context_card_inner()
+        def line(lbl: str, val: str) -> QLabel:
+            w = QLabel(f'{lbl}: {val}')
+            w.setStyleSheet('font-size: 11px; padding: 1px 0;')
+            w.setWordWrap(True)
+            return w
+        la = QLabel(f"Side A ({_fmt_time(ctx['t1'])})")
+        la.setStyleSheet('font-size: 11px; font-weight: 600; margin-top: 4px;')
+        self._context_card_inner_layout.addWidget(la)
+        self._context_card_inner_layout.addWidget(
+            line('Section', ctx.get('section_a', '—')))
+        self._context_card_inner_layout.addWidget(
+            line('Texture', ', '.join(ctx.get('texture_a', [])) or '—'))
+        self._context_card_inner_layout.addWidget(
+            line('Parts', (ctx.get('summary_a', '') + ': ' + ', '.join(ctx.get('parts_a', []))) if ctx.get('parts_a') else '—'))
+        lb = QLabel(f"Side B ({_fmt_time(ctx['t2'])})")
+        lb.setStyleSheet('font-size: 11px; font-weight: 600; margin-top: 8px;')
+        self._context_card_inner_layout.addWidget(lb)
+        self._context_card_inner_layout.addWidget(
+            line('Section', ctx.get('section_b', '—')))
+        self._context_card_inner_layout.addWidget(
+            line('Texture', ', '.join(ctx.get('texture_b', [])) or '—'))
+        self._context_card_inner_layout.addWidget(
+            line('Parts', (ctx.get('summary_b', '') + ': ' + ', '.join(ctx.get('parts_b', []))) if ctx.get('parts_b') else '—'))
 
     # -------------------------------------------------------------- overlays
 

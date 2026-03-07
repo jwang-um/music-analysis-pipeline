@@ -31,6 +31,7 @@ from stages.interpret_nmf import (characterize_components, format_nmf_report,
 from stages.interpret_ssm import (build_form_chart, compute_cross_section_similarity,
                                    format_ssm_report, get_section_annotations)
 from stages.interpret_arcs import interpret_arcs, format_cross_part_report
+from stages.motif_context import compute_motif_contexts, compute_cross_part_contexts
 from stages.validate import (validate_segmentation_boundaries,
                               validate_nmf_internal, validate_nmf_vs_ssm,
                               format_validation_report)
@@ -78,6 +79,8 @@ class AnalysisResults:
     movement_offsets_beats: list = field(default_factory=list)
     tempo_marks: list = field(default_factory=list)
     sequences: Optional[Dict] = None
+    motif_contexts: list = field(default_factory=list)
+    cross_part_contexts: list = field(default_factory=list)
     errors: list = field(default_factory=list)
 
 
@@ -266,6 +269,36 @@ def run_analysis(
             res.arc_report = (res.arc_report + '\n' + cp_report).strip()
     except Exception as e:
         res.errors.append(f'Cross-part interpretation: {e}')
+
+    # ---- Motif context (section, texture, parts per recurrence) ----
+    _progress('Interpretation', 79, 'Computing motif contexts...')
+    try:
+        if res.motif_pairs and res.tempo_marks:
+            res.motif_contexts = compute_motif_contexts(
+                res.motif_pairs,
+                H=H,
+                sections=res.sections,
+                sequences=res.sequences,
+                tempo_marks=res.tempo_marks,
+                comp_labels=res.comp_labels,
+                hop_length=hop_length,
+                sr=sr,
+                window_sec=5.0,
+            )
+        if res.cross_part_pairs and res.tempo_marks:
+            res.cross_part_contexts = compute_cross_part_contexts(
+                res.cross_part_pairs,
+                H=H,
+                sections=res.sections,
+                sequences=res.sequences,
+                tempo_marks=res.tempo_marks,
+                comp_labels=res.comp_labels,
+                hop_length=hop_length,
+                sr=sr,
+                window_sec=5.0,
+            )
+    except Exception as e:
+        res.errors.append(f'Motif context: {e}')
 
     # ---- Stage 5: validation ----
     _progress('Validation', 80, 'Validating segmentation...')
